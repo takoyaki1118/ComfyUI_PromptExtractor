@@ -7,10 +7,10 @@ import logging
 import json
 
 # ロギング設定
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(message)s')
 logger = logging.getLogger(__name__)
 
-# カスタム画像読み込みノード（LoadImageを基にimage_path出力ピンを追加）
+# カスタム画像読み込みノード
 class CustomLoadImageWithPathNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -36,66 +36,68 @@ class CustomLoadImageWithPathNode:
             if not os.path.exists(image_path):
                 raise ValueError(f"Image file does not exist: {image_path}")
 
-            logger.debug(f"Loading image: {image_path}")
+            logger.info(f"Loading image: {image_path}")
             img = Image.open(image_path)
             output_images = []
             output_masks = []
 
-            i = Image.open(image_path).convert("RGB")
-            image = np.array(i).astype(np.float32) / 255.0
-            image = torch.from_numpy(image)[None,]
+            i = img.convert("RGB")
+            image_array = np.array(i).astype(np.float32) / 255.0
+            image_tensor = torch.from_numpy(image_array)[None,]
 
             if "A" in img.getbands():
-                mask = np.array(img.getchannel("A")).astype(np.float32) / 255.0
+                mask = np.array(img.getchannel('A')).astype(np.float32) / 255.0
                 mask = 1.0 - torch.from_numpy(mask)
             else:
                 mask = torch.zeros((64, 64))
 
-            output_images.append(image)
+            output_images.append(image_tensor)
             output_masks.append(mask)
 
             output_image = torch.cat(output_images, dim=0)
             output_mask = torch.cat(output_masks, dim=0)
 
-            logger.debug(f"Output image_path: {image}")
+            logger.info(f"Image loaded successfully: {image}")
             return (output_image, output_mask, image)
 
         except Exception as e:
-            error_msg = f"Error loading image: {str(e)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.error(f"Error loading image: {str(e)}")
+            raise ValueError(f"Error loading image: {str(e)}")
 
-# PromptExtractorNode
+# プロンプト抽出ノード
 class PromptExtractorNode:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "image": ("IMAGE", {}),
-                "image_path": ("STRING", {"default": ""}),
+                "image_path": ("STRING", {"default": "Not found"}),
             }
         }
 
     RETURN_TYPES = ("STRING", "IMAGE")
     RETURN_NAMES = ("positive_prompt", "image")
     FUNCTION = "extract_prompt"
-    CATEGORY = "Custom Nodes"
 
     def extract_prompt(self, image, image_path):
         try:
+            # image_path の型チェック
+            if not isinstance(image_path, str):
+                raise TypeError(f"image_path must be a string, got {type(image_path).__name__}")
+
             full_path = os.path.join(folder_paths.get_input_directory(), image_path)
             if not os.path.exists(full_path):
                 full_path = image_path
                 if not os.path.exists(full_path):
                     raise ValueError(f"Image file does not exist: {full_path}")
 
-            logger.debug(f"Processing image: {full_path}")
+            logger.info(f"Processing image: {full_path}")
             if image.shape[-1] != 3:
                 raise ValueError("Image must have 3 channels (RGB)")
 
             img = Image.open(full_path)
             metadata = img.info
-            logger.debug(f"Metadata keys: {list(metadata.keys())}")
+            logger.info(f"Metadata keys: {list(metadata.keys())}")
             positive_prompt = "Not found"
 
             if "prompt" in metadata:
@@ -194,9 +196,8 @@ class PromptExtractorNode:
             return positive_prompt, image
 
         except Exception as e:
-            error_msg = f"Error extracting prompt: {str(e)}"
-            logger.error(error_msg)
-            raise ValueError(error_msg)
+            logger.error(f"Error extracting prompt: {str(e)}")
+            raise ValueError(f"Error extracting prompt: {str(e)}")
 
 # ノードのマッピング
 NODE_CLASS_MAPPINGS = {
