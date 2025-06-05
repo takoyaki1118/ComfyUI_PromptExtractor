@@ -1,60 +1,71 @@
-from PIL import Image
-import json
-import torch
 import os
+import torch
 import numpy as np
+from PIL import Image
 import folder_paths
 import logging
+import json
 
 # ロギング設定
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# カスタムLoadImageノード（変更なし）
-class CustomLoadImageNode:
+# カスタム画像読み込みノード（LoadImageを基にimage_path出力ピンを追加）
+class CustomLoadImageWithPathNode:
     @classmethod
     def INPUT_TYPES(cls):
         input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))]
         return {
             "required": {
-                "image_path": ([""] + sorted(files), {
-                    "default": "",
-                    "placeholder": "Select an image file or drag-and-drop"
-                }),
-            }
+                "image": (sorted(files), {"image_upload": True}),
+            },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING")
-    RETURN_NAMES = ("image", "image_path")
+    CATEGORY = "image"
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "image_path")
     FUNCTION = "load_image"
-    CATEGORY = "Custom Nodes"
 
-    def load_image(self, image_path):
+    def load_image(self, image):
         try:
-            if not image_path:
-                raise ValueError("No image path provided")
+            if not image:
+                raise ValueError("No image file selected")
 
-            full_path = os.path.join(folder_paths.get_input_directory(), image_path)
-            if not os.path.exists(full_path):
-                raise ValueError(f"Image file does not exist: {full_path}")
+            image_path = os.path.join(folder_paths.get_input_directory(), image)
+            if not os.path.exists(image_path):
+                raise ValueError(f"Image file does not exist: {image_path}")
 
-            logger.debug(f"Loading image: {full_path}")
-            img = Image.open(full_path).convert("RGB")
-            image_array = np.array(img).astype(np.float32) / 255.0
-            image_tensor = torch.from_numpy(image_array)[None,]
+            logger.debug(f"Loading image: {image_path}")
+            img = Image.open(image_path)
+            output_images = []
+            output_masks = []
 
-            if image_tensor.shape[-1] != 3:
-                raise ValueError("Image must have 3 channels (RGB)")
+            i = Image.open(image_path).convert("RGB")
+            image = np.array(i).astype(np.float32) / 255.0
+            image = torch.from_numpy(image)[None,]
 
-            return image_tensor, image_path
+            if "A" in img.getbands():
+                mask = np.array(img.getchannel("A")).astype(np.float32) / 255.0
+                mask = 1.0 - torch.from_numpy(mask)
+            else:
+                mask = torch.zeros((64, 64))
+
+            output_images.append(image)
+            output_masks.append(mask)
+
+            output_image = torch.cat(output_images, dim=0)
+            output_mask = torch.cat(output_masks, dim=0)
+
+            logger.debug(f"Output image_path: {image}")
+            return (output_image, output_mask, image)
 
         except Exception as e:
             error_msg = f"Error loading image: {str(e)}"
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-# プロンプト抽出ノード（修正版）
+# PromptExtractorNode
 class PromptExtractorNode:
     @classmethod
     def INPUT_TYPES(cls):
@@ -72,7 +83,6 @@ class PromptExtractorNode:
 
     def extract_prompt(self, image, image_path):
         try:
-            # 画像パスの検証
             full_path = os.path.join(folder_paths.get_input_directory(), image_path)
             if not os.path.exists(full_path):
                 full_path = image_path
@@ -80,12 +90,9 @@ class PromptExtractorNode:
                     raise ValueError(f"Image file does not exist: {full_path}")
 
             logger.debug(f"Processing image: {full_path}")
-
-            # 画像検証
             if image.shape[-1] != 3:
                 raise ValueError("Image must have 3 channels (RGB)")
 
-            # メタデータ抽出
             img = Image.open(full_path)
             metadata = img.info
             logger.debug(f"Metadata keys: {list(metadata.keys())}")
@@ -96,7 +103,6 @@ class PromptExtractorNode:
                     prompt_data = json.loads(metadata["prompt"])
                     logger.debug(f"Prompt metadata nodes: {len(prompt_data)}")
 
-                    # リンク情報を解決するヘルパー関数
                     def resolve_prompt(value, prompt_data, visited=None):
                         if visited is None:
                             visited = set()
@@ -119,7 +125,6 @@ class PromptExtractorNode:
                                     return resolve_prompt(text_input, prompt_data, visited)
                         return value if isinstance(value, str) else str(value)
 
-                    # 1. PromptCombinerNodeを直接検索
                     for node_id, node in prompt_data.items():
                         if node.get("class_type") == "PromptCombinerNode":
                             prompt = node.get("inputs", {}).get("prompt", "Not found")
@@ -128,11 +133,9 @@ class PromptExtractorNode:
                             if positive_prompt != "Not found":
                                 break
 
-                    # 2. 見つからない場合、ShowText|pysssssをチェック
                     if positive_prompt == "Not found":
                         for node_id, node in prompt_data.items():
                             if node.get("class_type") == "ShowText|pysssss":
-                                # widgets_valuesを優先
                                 widgets_values = node.get("widgets_values", ["Not found"])
                                 logger.debug(f"ShowText|pysssss (ID {node_id}) widgets_values: {widgets_values}")
                                 if isinstance(widgets_values, list) and widgets_values:
@@ -141,7 +144,6 @@ class PromptExtractorNode:
                                         positive_prompt = prompt
                                         logger.debug(f"Extracted prompt from widgets_values: {positive_prompt}")
                                         break
-                                # inputs.textをフォールバック
                                 text_input = node.get("inputs", {}).get("text", "Not found")
                                 logger.debug(f"ShowText|pysssss text_input: {text_input}")
                                 prompt = resolve_prompt(text_input, prompt_data)
@@ -158,7 +160,7 @@ class PromptExtractorNode:
                 try:
                     workflow_data = json.loads(metadata["workflow"])
                     logger.debug(f"Workflow metadata nodes: {len(workflow_data.get('nodes', []))}")
-                    for node in workflow_data.get("nodes", []):
+                    for node in workflow_data.get('nodes', []):
                         if node.get("type") == "PromptCombinerNode":
                             widgets_values = node.get("widgets_values", ["Not found"])
                             logger.debug(f"PromptCombinerNode widgets_values: {widgets_values}")
@@ -180,7 +182,6 @@ class PromptExtractorNode:
                     logger.error(f"Invalid JSON in workflow metadata: {str(e)}")
                     raise ValueError(f"Invalid JSON in workflow metadata: {str(e)}")
 
-            # リスト形式のプロンプトを文字列に変換
             if isinstance(positive_prompt, list):
                 if len(positive_prompt) == 1:
                     positive_prompt = positive_prompt[0] if isinstance(positive_prompt[0], str) else str(positive_prompt[0])
@@ -199,11 +200,11 @@ class PromptExtractorNode:
 
 # ノードのマッピング
 NODE_CLASS_MAPPINGS = {
-    "CustomLoadImageNode": CustomLoadImageNode,
+    "CustomLoadImageWithPathNode": CustomLoadImageWithPathNode,
     "PromptExtractorNode": PromptExtractorNode
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "CustomLoadImageNode": "Custom Load Image Node",
+    "CustomLoadImageWithPathNode": "Custom Load Image With Path",
     "PromptExtractorNode": "Prompt Extractor Node"
 }
